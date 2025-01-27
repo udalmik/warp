@@ -20,11 +20,12 @@ package cli
 import (
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
+
 	"github.com/minio/cli"
 	"github.com/minio/pkg/v3/console"
 	"github.com/minio/warp/pkg/bench"
-	"strconv"
-	"strings"
 )
 
 var listFlags = []cli.Flag{
@@ -55,6 +56,15 @@ var listFlags = []cli.Flag{
 		Name:  "branchingFactors",
 		Value: "2/2",
 		Usage: "branchingFactors, specifying the branching factor at each level separated by /. eg: depth=3 branchingFactors=/12/30/1000 makes sense only when --nested",
+	},
+	cli.IntFlag{
+		Name:  "depthToList",
+		Value: -1,
+		Usage: "When set, specifies the level to list objects at, 0 = root, 1 = top level directory, 2 = 2nd level directory etc. A random directory will be chosen at the specified level",
+	},
+	cli.BoolFlag{
+		Name:  "list-existing",
+		Usage: "Whether to list existing data that has been pre-populated for the nested list objects benchmark",
 	},
 }
 
@@ -90,7 +100,9 @@ func mainList(ctx *cli.Context) error {
 		NoPrefix:         ctx.Bool("noprefix"),
 		Nested:           ctx.Bool("nested"),
 		BranchingFactors: branchingFactors,
-		FixedPrefix:      strings.Trim(ctx.String("prefix"), "/"), // reuse this as a fixed prefix when nesting enabled
+		FixedPrefix:      strings.Trim(ctx.String("prefix"), "/"), // reuse this as a fixed prefix when nesting enabled,
+		DepthToList:      ctx.Int("depthToList"),
+		ListExisting:     ctx.Bool("list-existing"), // reuse to avoid re-generating files when nesting enabled.
 	}
 	return runBench(ctx, &b)
 }

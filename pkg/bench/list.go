@@ -20,13 +20,14 @@ package bench
 import (
 	"context"
 	"fmt"
-	"github.com/minio/minio-go/v7"
 	"math/rand"
 	"net/http"
 	"path"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/minio/minio-go/v7"
 
 	"github.com/minio/pkg/v3/console"
 	"github.com/minio/warp/pkg/generator"
@@ -44,6 +45,8 @@ type List struct {
 	Nested           bool   // New field: whether to use nested structure
 	BranchingFactors []int  // New field: number of child nodes at each node at each level
 	FixedPrefix      string // New field: fixed prefix to use for nested calls
+	DepthToList      int    // New field: depth to list at when performing read part of benchmark
+	ListExisting     bool   // When nesting is used, determines whether to populate the tree structure or not
 }
 
 // Prepare will create an empty bucket or delete any content already there
@@ -82,6 +85,11 @@ func (d *List) Prepare(ctx context.Context) error {
 	var mu sync.Mutex
 	objsCreated := 0
 	var groupErr error
+
+	if d.Nested && d.ListExisting {
+		return nil
+	}
+
 	lastLevelDirectories := multiplyArray(d.BranchingFactors)
 
 	for i := 0; i < d.Concurrency; i++ {
@@ -116,9 +124,11 @@ func (d *List) Prepare(ctx context.Context) error {
 				name := obj.Name
 				exists[name] = struct{}{}
 
+				objIndex := i*objPerPrefix + j
+
 				// Generate nested prefix if Nested is enabled
 				if d.Nested {
-					nestedPrefix := generateNestedPrefix(j, d.BranchingFactors, lastLevelDirectories, d.FixedPrefix)
+					nestedPrefix := generateNestedPrefix(objIndex, d.BranchingFactors, lastLevelDirectories, d.FixedPrefix)
 					obj.Prefix = strings.TrimSuffix(nestedPrefix, "/")
 					obj.SetName(path.Base(name))
 				}
@@ -128,7 +138,7 @@ func (d *List) Prepare(ctx context.Context) error {
 					obj := src.Object()
 					obj.Name = name
 					if d.Nested {
-						nestedPrefix := generateNestedPrefix(j, d.BranchingFactors, lastLevelDirectories, d.FixedPrefix)
+						nestedPrefix := generateNestedPrefix(objIndex, d.BranchingFactors, lastLevelDirectories, d.FixedPrefix)
 						obj.Prefix = strings.TrimSuffix(nestedPrefix, "/")
 						obj.SetName(path.Base(name))
 					}
@@ -240,8 +250,13 @@ func (d *List) Start(ctx context.Context, wait chan struct{}) (Operations, error
 				if !d.Nested {
 					prefix = objs[0].Prefix + "/"
 				} else {
-					// Generate a random parent prefix
-					parentDepth := rand.Intn(len(d.BranchingFactors) + 1) // Random depth between 0(root) and depth(leaf)
+					parentDepth := d.DepthToList
+
+					if parentDepth == -1 {
+						// Generate a random parent prefix
+						parentDepth = rand.Intn(len(d.BranchingFactors) + 1) // Random depth between 0(root) and depth(leaf)
+					}
+
 					prefix = d.FixedPrefix + "/"
 					for level := 1; level <= parentDepth; level++ {
 						dir := rand.Intn(d.BranchingFactors[level-1]) // Random directory name between 0 and branchingFactor-1
