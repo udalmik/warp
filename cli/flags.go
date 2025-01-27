@@ -286,7 +286,7 @@ var ioFlags = []cli.Flag{
 	cli.IntFlag{
 		Name:  "sampling-ratio",
 		Value: 1,
-		Usage: "Sampling ratio for collector",
+		Usage: "Sampling ratio for collector. Sampling ration of 100 means 1 out of every 100 requests would be sampled.",
 	},
 }
 
