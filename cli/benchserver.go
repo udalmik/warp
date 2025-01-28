@@ -105,7 +105,7 @@ func runServerBenchmark(ctx *cli.Context, b bench.Benchmark) (bool, error) {
 	infoLn := monitor.InfoLn
 	errorLn := monitor.Errorln
 
-	var allOps bench.Operations
+	// var allOps bench.Operations
 
 	// Serialize parameters
 	excludeFlags := map[string]struct{}{
@@ -206,41 +206,65 @@ func runServerBenchmark(ctx *cli.Context, b bench.Benchmark) (bool, error) {
 	prof.stop(context.Background(), ctx, fileName+".profiles.zip")
 
 	infoLn("Done. Downloading operations...")
-	downloaded := conns.downloadOps()
-	switch len(downloaded) {
-	case 0:
-	case 1:
-		allOps = downloaded[0]
-	default:
-		threads := uint16(0)
-		for _, ops := range downloaded {
-			threads = ops.OffsetThreads(threads)
-			allOps = append(allOps, ops...)
-		}
+
+	operationsChannel := conns.downloadOpsStream()
+
+	f, err := os.Create(fileName + ".csv.zst")
+	if err != nil {
+		errorLn("Unable to write benchmark data:", err)
+	} else {
+		func() {
+			defer f.Close()
+			enc, err := zstd.NewWriter(f, zstd.WithEncoderLevel(zstd.SpeedBetterCompression))
+			fatalIf(probe.NewError(err), "Unable to compress benchmark output")
+
+			defer enc.Close()
+			err = operationsChannel.CSV(enc, commandLine(ctx))
+			fatalIf(probe.NewError(err), "Unable to write benchmark output")
+
+			infoLn(fmt.Sprintf("Benchmark data written to %q\n", fileName+".csv.zst"))
+		}()
 	}
 
-	if len(allOps) > 0 {
-		allOps.SortByStartTime()
-		f, err := os.Create(fileName + ".csv.zst")
-		if err != nil {
-			errorLn("Unable to write benchmark data:", err)
-		} else {
-			func() {
-				defer f.Close()
-				enc, err := zstd.NewWriter(f, zstd.WithEncoderLevel(zstd.SpeedBetterCompression))
-				fatalIf(probe.NewError(err), "Unable to compress benchmark output")
+	// => old
+	// downloaded := conns.downloadOps()
+	// switch len(downloaded) {
+	// case 0:
+	// case 1:
+	// 	allOps = downloaded[0]
+	// default:
+	// 	threads := uint16(0)
+	// 	for _, ops := range downloaded {
+	// 		// TODO unique thread id important
+	// 		threads = ops.OffsetThreads(threads)
+	// 		allOps = append(allOps, ops...)
+	// 	}
+	// }
 
-				defer enc.Close()
-				err = allOps.CSV(enc, commandLine(ctx))
-				fatalIf(probe.NewError(err), "Unable to write benchmark output")
+	// if len(allOps) > 0 {
+	// 	allOps.SortByStartTime()
+	// 	f, err := os.Create(fileName + ".csv.zst")
+	// 	if err != nil {
+	// 		errorLn("Unable to write benchmark data:", err)
+	// 	} else {
+	// 		func() {
+	// 			defer f.Close()
+	// 			enc, err := zstd.NewWriter(f, zstd.WithEncoderLevel(zstd.SpeedBetterCompression))
+	// 			fatalIf(probe.NewError(err), "Unable to compress benchmark output")
 
-				infoLn(fmt.Sprintf("Benchmark data written to %q\n", fileName+".csv.zst"))
-			}()
-		}
-	}
-	monitor.OperationsReady(allOps, fileName, commandLine(ctx))
-	printAnalysis(ctx, allOps)
+	// 			defer enc.Close()
+	// 			err = allOps.CSV(enc, commandLine(ctx))
+	// 			fatalIf(probe.NewError(err), "Unable to write benchmark output")
 
+	// 			infoLn(fmt.Sprintf("Benchmark data written to %q\n", fileName+".csv.zst"))
+	// 		}()
+	// 	}
+	// }
+
+	// TODO refoctoring needed, we update global state with empty array, need to consider serving from file if needed
+	monitor.OperationsReady([]bench.Operation{}, fileName, commandLine(ctx))
+	// TODO rewrite with fixed amount of memory usage, causing OOM currently on large datasets
+	// printAnalysis(ctx, allOps)
 	err = conns.startStageAll(stageCleanup, time.Now(), false)
 	if err != nil {
 		errorLn("Failed to clean up all clients", err)
@@ -473,8 +497,7 @@ func (c *connections) downloadOps() []bench.Operations {
 				c.errorF("Client %v returned error: %v\n", c.hostName(i), resp.Err)
 				return
 			}
-			c.info("Client ", c.hostName(i), ": Operations downloaded.")
-
+			c.info("Client ", c.hostName(i), ": Operations downloaded. Length: ", len(resp.Ops))
 			mu.Lock()
 			res = append(res, resp.Ops)
 			mu.Unlock()
@@ -482,6 +505,47 @@ func (c *connections) downloadOps() []bench.Operations {
 	}
 	wg.Wait()
 	return res
+}
+
+// downloadOpsStream will download operations from all connected clients and return result as channel
+// If an error is encountered the result will be ignored.
+func (c *connections) downloadOpsStream() bench.OperationsChannel {
+	var wg sync.WaitGroup
+	threadIdOffset := uint16(0)
+	c.info("Downloading operations...")
+	wg.Add(len(c.ws))
+	// result channel
+	ch := make(chan bench.Operation, 1024)
+	// close channel when download completed
+	go func() {
+		wg.Wait()
+		c.info("Operations download completed.")
+		close(ch)
+	}()
+	for i, conn := range c.ws {
+		if conn == nil {
+			continue
+		}
+		go func(i int) {
+			defer wg.Done()
+			resp, err := c.roundTrip(i, serverRequest{Operation: serverReqSendOps})
+			if err != nil {
+				c.errorF("Client %v download returned error: %v\n", c.hostName(i), resp.Err)
+				return
+			}
+			if resp.Err != "" {
+				c.errorF("Client %v returned error: %v\n", c.hostName(i), resp.Err)
+				return
+			}
+			// add offset to make thread ids unique accross clients
+			threadIdOffset = resp.Ops.OffsetThreads(threadIdOffset)
+			c.info("Client ", c.hostName(i), ": Operations downloaded. Number of entries: ", len(resp.Ops))
+			for _, op := range resp.Ops {
+				ch <- op
+			}
+		}(i)
+	}
+	return ch
 }
 
 // waitForStage will wait for stage completion on all clients.

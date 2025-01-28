@@ -33,6 +33,7 @@ import (
 )
 
 type Operations []Operation
+type OperationsChannel chan Operation
 
 type Operation struct {
 	Start     time.Time  `json:"start"`
@@ -1055,6 +1056,38 @@ func (o Operations) CSV(w io.Writer, comment string) error {
 		}
 	}
 
+	return bw.Flush()
+}
+
+// CSV will write the operations to w as CSV.
+// The comment, if any, is written at the end of the file, each line prefixed with '# '.
+func (sourceChannel OperationsChannel) CSV(w io.Writer, comment string) error {
+	bw := bufio.NewWriter(w)
+	_, err := bw.WriteString("idx\tthread\top\tclient_id\tn_objects\tbytes\tendpoint\tfile\terror\tstart\tfirst_byte\tend\tduration_ns\n")
+	if err != nil {
+		return err
+	}
+	i := 0
+	for op := range sourceChannel {
+		var ttfb string
+		if op.FirstByte != nil {
+			ttfb = op.FirstByte.Format(time.RFC3339Nano)
+		}
+		_, err := fmt.Fprintf(bw, "%d\t%d\t%s\t%s\t%d\t%d\t%s\t%s\t%s\t%s\t%s\t%s\t%d\n", i, op.Thread, op.OpType, op.ClientID, op.ObjPerOp, op.Size, csvEscapeString(op.Endpoint), op.File, csvEscapeString(op.Err), op.Start.Format(time.RFC3339Nano), ttfb, op.End.Format(time.RFC3339Nano), op.End.Sub(op.Start)/time.Nanosecond)
+		i++
+		if err != nil {
+			return err
+		}
+	}
+	if len(comment) > 0 {
+		lines := strings.Split(comment, "\n")
+		for _, txt := range lines {
+			_, err := bw.WriteString("# " + txt + "\n")
+			if err != nil {
+				return err
+			}
+		}
+	}
 	return bw.Flush()
 }
 
