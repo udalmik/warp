@@ -514,6 +514,8 @@ func (c *connections) downloadOpsStream() bench.OperationsChannel {
 	threadIdOffset := uint16(0)
 	c.info("Downloading operations...")
 	wg.Add(len(c.ws))
+	// concurrency semaphor
+	semaphor := make(chan bool, 5)
 	// result channel
 	ch := make(chan bench.Operation, 1024)
 	// close channel when download completed
@@ -528,6 +530,11 @@ func (c *connections) downloadOpsStream() bench.OperationsChannel {
 		}
 		go func(i int) {
 			defer wg.Done()
+			semaphor <- true
+			defer func() {
+				// release semaphore
+				<-semaphor
+			}()
 			resp, err := c.roundTrip(i, serverRequest{Operation: serverReqSendOps})
 			if err != nil {
 				c.errorF("Client %v download returned error: %v\n", c.hostName(i), resp.Err)
